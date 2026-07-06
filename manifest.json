@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT Workspace Auto-Joiner",
+  "version": "1.0",
+  "description": "Ekstensi untuk mempermudah join ke workspace ChatGPT secara langsung.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "notifications",
+    "storage",
+    "downloads",
+    "browsingData"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "128": "icon.png"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
