@@ -9,10 +9,15 @@
     "notifications",
     "storage",
     "downloads",
-    "browsingData"
+    "browsingData",
+    "cookies"
   ],
   "host_permissions": [
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
+    "https://*.openai.com/*",
+    "https://xunmail.cn/*",
+    "https://*.xunmail.cn/*"
   ],
   "background": {
     "service_worker": "background.js"

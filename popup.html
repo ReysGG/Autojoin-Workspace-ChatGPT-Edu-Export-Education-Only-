@@ -223,7 +223,8 @@
       .result-detail { color: #d7d7d7; word-break: break-all; }
 
       #authStatusBox,
-      #authPreviewBox { display: none; }
+      #authPreviewBox,
+      #switchAccountStatusBox { display: none; }
 
       .auth-preview {
         display: grid;
@@ -270,8 +271,9 @@
         <div>
           <h2>Workspace Joiner</h2>
           <p class="subtitle">Request join ke workspace ChatGPT.</p>
+          <p id="currentUserEmail" style="font-size: 11px; color: #38bdf8; margin-top: 4px; font-weight: 500;"></p>
         </div>
-        <span class="workspace-badge">43 targets</span>
+        <span class="workspace-badge" id="targetBadge">1 target</span>
       </div>
 
       <button id="joinBtn">
@@ -281,6 +283,28 @@
 
       <div id="progressBox"></div>
       <div id="statusBox" class="status-container"></div>
+
+      <details open>
+        <summary>Auto Login ChatGPT (Outlook + Xunmail)</summary>
+        <div class="section">
+          <p class="section-note">Login otomatis dengan format <code>email----password----client_id----refresh_token</code> & OTP otomatis via Xunmail API.</p>
+          <input type="file" id="outlookAccountFileInput" accept=".txt" style="display: none;" />
+          <button id="selectOutlookAccountBtn" class="secondary">🔑 Pilih File Account (.txt)</button>
+          <textarea id="outlookAccountInput" placeholder="Atau paste 1 baris akun di sini..." style="width: 100%; height: 50px; background: #111; border: 1px solid var(--line); color: var(--text); padding: 6px; font-size: 11px; border-radius: 6px; font-family: monospace; resize: vertical;"></textarea>
+          <button id="startOutlookLoginBtn">Start Auto Login & Join</button>
+          <div id="outlookAutoLoginStatusBox" class="status-container"></div>
+        </div>
+      </details>
+
+      <details>
+        <summary>Ganti Akun (Auth JSON)</summary>
+        <div class="section">
+          <p class="section-note">Switch akun ChatGPT secara otomatis dengan mengupload file auth JSON (seperti briceleannonyqzv@outlook.9router.json).</p>
+          <input type="file" id="switchAccountFileInput" accept=".json" style="display: none;" />
+          <button id="selectSwitchAccountBtn" class="secondary">📁 Pilih File Auth JSON</button>
+          <div id="switchAccountStatusBox" class="status-container"></div>
+        </div>
+      </details>
 
       <details>
         <summary>Loop Rescue</summary>

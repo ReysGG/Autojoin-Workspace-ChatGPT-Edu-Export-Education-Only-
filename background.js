@@ -5,7 +5,9 @@ const DEFAULT_STATE = {
     current: 0,
     total: 0,
     okCount: 0,
-    failCount: 0
+    failCount: 0,
+    pendingCount: 0,
+    requestCount: 0
   },
   results: [],
   errorMsg: '',
@@ -142,7 +144,7 @@ function showNotification(state) {
 
   if (state.status === 'completed') {
     title = '✓ Workspace Join Selesai!';
-    message = `Berhasil: ${state.progress.okCount}, Gagal: ${state.progress.failCount} dari ${state.progress.total} workspace.`;
+    message = `Joined: ${state.progress.okCount || 0}, Pending: ${state.progress.pendingCount || 0}, Gagal: ${state.progress.failCount || 0} dari ${state.progress.total} workspace.`;
   } else if (state.status === 'error') {
     title = '✗ Proses Join Terhenti';
     message = state.errorMsg || 'Terjadi kesalahan saat memproses workspace.';
@@ -165,7 +167,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getStoredState().then(state => {
       sendResponse(state);
     });
-    return true; // Keep channel open for async response
+    return true;
   }
 
   if (message.action === 'EXPORT_AUTH_SESSION') {
@@ -175,6 +177,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'CLEAR_CHATGPT_SITE_DATA') {
     clearChatGPTSiteData(sendResponse);
+    return true;
+  }
+
+  if (message.action === 'SWITCH_ACCOUNT_JSON') {
+    switchAccountFromJson(message.authData, sendResponse);
+    return true;
+  }
+
+  if (message.action === 'START_OUTLOOK_AUTO_LOGIN') {
+    startOutlookAutoLogin(message.accountData, message.workspaceId, sendResponse);
     return true;
   }
 
@@ -218,7 +230,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       await startProcessing(workspaceIds, sendResponse);
     });
-    return true; // Keep channel open for async response
+    return true;
   }
 
   if (message.action === 'JOIN_PROGRESS') {
@@ -228,8 +240,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const { result, index, total } = message;
       state.progress.current = index;
       state.progress.total = total;
-      if (result.ok) {
+      state.progress.pendingCount = state.progress.pendingCount || 0;
+      state.progress.requestCount = state.progress.requestCount || 0;
+
+      if (result.accepted) {
+        state.progress.requestCount++;
+      }
+
+      if (result.joined) {
         state.progress.okCount++;
+      } else if (result.accepted) {
+        state.progress.pendingCount++;
       } else {
         state.progress.failCount++;
       }
@@ -265,6 +286,363 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 });
+
+async function switchAccountFromJson(authData, sendResponse) {
+  try {
+    if (!authData || typeof authData !== 'object') {
+      throw new Error('Format file JSON tidak valid.');
+    }
+
+    const sessionToken = authData.sessionToken
+      || (authData.tokens && authData.tokens.access_token)
+      || authData.accessToken
+      || (Array.isArray(authData.accounts) && authData.accounts[0] && authData.accounts[0].accessToken);
+
+    if (!sessionToken) {
+      throw new Error('File JSON tidak memiliki token autentikasi (sessionToken / accessToken) yang valid.');
+    }
+
+    // 1. Clear site data for chatgpt.com
+    await new Promise((resolve) => {
+      chrome.browsingData.remove({ origins: ['https://chatgpt.com'] }, {
+        cookies: true,
+        localStorage: true,
+        indexedDB: true,
+        cacheStorage: true,
+        serviceWorkers: true
+      }, () => resolve());
+    });
+
+    // 2. Set __Secure-next-auth.session-token cookie on chatgpt.com
+    await new Promise((resolve, reject) => {
+      chrome.cookies.set({
+        url: 'https://chatgpt.com/',
+        name: '__Secure-next-auth.session-token',
+        value: sessionToken,
+        path: '/',
+        secure: true
+      }, (cookie) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else {
+          resolve(cookie);
+        }
+      });
+    });
+
+    const email = authData.user?.email || authData.email || authData.name || 'Akun Terhubung';
+    const name = authData.user?.name || authData.name || '';
+    const planType = authData.account?.planType || authData.providerSpecificData?.chatgptPlanType || '';
+
+    // 3. Open or update ChatGPT tab & Auto-Join on tab load
+    let targetTab;
+    const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+    if (tabs && tabs.length > 0) {
+      targetTab = await chrome.tabs.update(tabs[0].id, { url: 'https://chatgpt.com/', active: true });
+    } else {
+      targetTab = await chrome.tabs.create({ url: 'https://chatgpt.com/' });
+    }
+
+    const autoJoinWorkspace = () => {
+      const listener = (tabId, changeInfo) => {
+        if (tabId === targetTab.id && changeInfo.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(listener);
+          setTimeout(() => {
+            startProcessing(["df0cb75f-1e09-43c4-b973-043f6bfafcbd"], () => {});
+          }, 800);
+        }
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+    };
+
+    autoJoinWorkspace();
+
+    sendResponse({
+      success: true,
+      account: { email, name, planType },
+      autoJoined: true
+    });
+  } catch (err) {
+    sendResponse({ success: false, error: err.message || String(err) });
+  }
+}
+
+async function startOutlookAutoLogin(accountData, workspaceId, sendResponse) {
+  try {
+    if (!accountData || typeof accountData !== 'object') {
+      throw new Error('Data akun tidak valid.');
+    }
+
+    const { email, password, clientId, refreshToken } = accountData;
+
+    if (!email || !password) {
+      throw new Error('Email atau password tidak ditemukan di data akun.');
+    }
+
+    // 1. Fetch initial mail count from Xunmail
+    let initialMailCount = 0;
+    if (clientId && refreshToken) {
+      try {
+        const countParams = new URLSearchParams({ email, client_id: clientId, refresh_token: refreshToken, mailbox: 'INBOX' });
+        const cRes = await fetch(`https://xunmail.cn/api/graph/mail-count?${countParams.toString()}`);
+        if (cRes.ok) {
+          const cData = await cRes.json();
+          initialMailCount = cData.count || (cData.data && cData.data.count) || 0;
+        }
+      } catch (e) {}
+    }
+
+    // 2. Clear site data for chatgpt.com & auth.openai.com
+    await new Promise((resolve) => {
+      chrome.browsingData.remove({ origins: ['https://chatgpt.com', 'https://auth.openai.com'] }, {
+        cookies: true,
+        localStorage: true,
+        indexedDB: true,
+        cacheStorage: true,
+        serviceWorkers: true
+      }, () => resolve());
+    });
+
+    // 3. Open login page
+    let targetTab;
+    const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+    if (tabs && tabs.length > 0) {
+      targetTab = await chrome.tabs.update(tabs[0].id, { url: 'https://chatgpt.com/auth/login', active: true });
+    } else {
+      targetTab = await chrome.tabs.create({ url: 'https://chatgpt.com/auth/login' });
+    }
+
+    sendResponse({ success: true, message: 'Memulai proses auto login untuk ' + email });
+
+    // 4. Step-by-step automated loop
+    let pollCount = 0;
+    const maxPolls = 35; // 35 * 2.5s = ~87 seconds
+    const triedCodes = new Set();
+
+    const interval = setInterval(async () => {
+      pollCount++;
+      if (pollCount > maxPolls) {
+        clearInterval(interval);
+        return;
+      }
+
+      try {
+        const currentTab = await chrome.tabs.get(targetTab.id);
+        if (!currentTab || !currentTab.url) return;
+
+        // Check if user is logged in
+        if (currentTab.url.startsWith('https://chatgpt.com/') && !currentTab.url.includes('/auth/') && !currentTab.url.includes('/login')) {
+          clearInterval(interval);
+          setTimeout(() => {
+            startProcessing([workspaceId || "df0cb75f-1e09-43c4-b973-043f6bfafcbd"], () => {});
+          }, 1000);
+          return;
+        }
+
+        // Script injection for automated login form interaction
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: targetTab.id },
+          func: automatedLoginFormStep,
+          args: [email, password]
+        });
+
+        const stepResult = results && results[0] && results[0].result;
+
+        if (stepResult === 'NEED_OTP' && clientId && refreshToken) {
+          const otpCode = await fetchVerificationCodeFromXunmail(email, clientId, refreshToken, initialMailCount, triedCodes);
+          if (otpCode && !triedCodes.has(otpCode)) {
+            triedCodes.add(otpCode);
+            console.log(`[Xunmail] Submitting fresh OTP: ${otpCode}`);
+            await chrome.scripting.executeScript({
+              target: { tabId: targetTab.id },
+              func: automatedOtpFormStep,
+              args: [otpCode]
+            });
+          }
+        }
+      } catch (e) {
+        // Ignore temporary injection errors during tab navigation
+      }
+    }, 2500);
+
+  } catch (err) {
+    sendResponse({ success: false, error: err.message || String(err) });
+  }
+}
+
+async function fetchVerificationCodeFromXunmail(email, clientId, refreshToken, initialCount = 0, triedCodes = new Set()) {
+  const params = new URLSearchParams({
+    email,
+    client_id: clientId,
+    refresh_token: refreshToken,
+    mailbox: 'INBOX'
+  });
+
+  // 1. Check current mail count
+  let currentCount = 0;
+  try {
+    const countRes = await fetch(`https://xunmail.cn/api/graph/mail-count?${params.toString()}`);
+    if (countRes.ok) {
+      const countData = await countRes.json();
+      currentCount = countData.count || (countData.data && countData.data.count) || 0;
+    }
+  } catch (e) {}
+
+  if (!currentCount) {
+    try {
+      const countRes = await fetch(`https://xunmail.cn/api/oauth2/mail-count?${params.toString()}`);
+      if (countRes.ok) {
+        const countData = await countRes.json();
+        currentCount = countData.count || (countData.data && countData.data.count) || 0;
+      }
+    } catch (e) {}
+  }
+
+  // 2. If new email arrived (or query latest mail count), fetch by index
+  const targetIndex = currentCount > initialCount ? currentCount : currentCount;
+  if (targetIndex > 0) {
+    const indexParams = new URLSearchParams({
+      email,
+      client_id: clientId,
+      refresh_token: refreshToken,
+      mailbox: 'INBOX',
+      index: String(targetIndex)
+    });
+
+    try {
+      const res = await fetch(`https://xunmail.cn/api/graph/mail-by-index?${indexParams.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        const code = parseOtpFromXunmailData(data);
+        if (code && !triedCodes.has(code)) return code;
+      }
+    } catch (e) {}
+
+    try {
+      const res = await fetch(`https://xunmail.cn/api/oauth2/mail-by-index?${indexParams.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        const code = parseOtpFromXunmailData(data);
+        if (code && !triedCodes.has(code)) return code;
+      }
+    } catch (e) {}
+  }
+
+  // 3. Fallback: mail-latest
+  try {
+    const res = await fetch(`https://xunmail.cn/api/graph/mail-latest?${params.toString()}`);
+    if (res.ok) {
+      const data = await res.json();
+      const code = parseOtpFromXunmailData(data);
+      if (code && !triedCodes.has(code)) return code;
+    }
+  } catch (e) {}
+
+  try {
+    const res = await fetch(`https://xunmail.cn/api/oauth2/mail-latest?${params.toString()}`);
+    if (res.ok) {
+      const data = await res.json();
+      const code = parseOtpFromXunmailData(data);
+      if (code && !triedCodes.has(code)) return code;
+    }
+  } catch (e) {}
+
+  return '';
+}
+
+function parseOtpFromXunmailData(data) {
+  if (!data) return '';
+  const mail = data.mail || (data.data && data.data.mail) || data;
+  if (mail && mail.verification_code) return String(mail.verification_code).trim();
+  if (mail) {
+    const text = `${mail.subject || ''} ${mail.body || ''}`;
+    const match = text.match(/\b\d{6}\b/);
+    if (match) return match[0];
+  }
+  return '';
+}
+
+function automatedLoginFormStep(email, password) {
+  const pageText = document.body ? document.body.innerText : '';
+  const isOtpPage = pageText.includes('Check your inbox') 
+    || pageText.includes('verification code') 
+    || pageText.includes('Enter the verification code')
+    || Boolean(document.querySelector('input[name="code"], input[name="email-verification-code"], input[id="email-verification-code"], input[autocomplete="one-time-code"]'));
+
+  if (isOtpPage) {
+    return 'NEED_OTP';
+  }
+
+  const emailInput = document.querySelector('input[name="username"], input[type="email"], input#username, input[name="email"]');
+  if (emailInput && !emailInput.disabled && emailInput.offsetParent !== null) {
+    if (emailInput.value !== email) {
+      emailInput.value = email;
+      emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+      emailInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    const continueBtn = document.querySelector('button[type="submit"], button[name="action"][value="default"], button.c_button, button[data-action-button-primary="true"]')
+      || Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().toLowerCase().includes('continue'));
+    if (continueBtn) {
+      continueBtn.click();
+      return 'SUBMITTED_EMAIL';
+    }
+  }
+
+  const passwordInput = document.querySelector('input[name="password"], input[type="password"], input#password');
+  if (passwordInput && !passwordInput.disabled && passwordInput.offsetParent !== null) {
+    if (passwordInput.value !== password) {
+      passwordInput.value = password;
+      passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
+      passwordInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    const continueBtn = document.querySelector('button[type="submit"], button[name="action"][value="default"], button.c_button, button[data-action-button-primary="true"]')
+      || Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().toLowerCase().includes('continue'));
+    if (continueBtn) {
+      continueBtn.click();
+      return 'SUBMITTED_PASSWORD';
+    }
+  }
+
+  return 'WAITING';
+}
+
+function automatedOtpFormStep(code) {
+  if (!code) return 'NO_CODE';
+  const cleanCode = String(code).trim();
+
+  const digitInputs = document.querySelectorAll('input[data-index]');
+  if (digitInputs && digitInputs.length === 6) {
+    const chars = cleanCode.split('');
+    chars.forEach((c, idx) => {
+      if (digitInputs[idx]) {
+        digitInputs[idx].value = c;
+        digitInputs[idx].dispatchEvent(new Event('input', { bubbles: true }));
+        digitInputs[idx].dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    const submitBtn = document.querySelector('button[type="submit"], button[name="action"][value="default"], button.c_button')
+      || Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().toLowerCase().includes('continue'));
+    if (submitBtn) submitBtn.click();
+    return 'SUBMITTED_OTP_DIGITS';
+  }
+
+  const singleOtpInput = document.querySelector('input[name="code"], input[name="email-verification-code"], input[id="email-verification-code"], input[autocomplete="one-time-code"], input[type="text"], input[type="number"]');
+  if (singleOtpInput) {
+    singleOtpInput.focus();
+    singleOtpInput.value = cleanCode;
+    singleOtpInput.dispatchEvent(new Event('input', { bubbles: true }));
+    singleOtpInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const submitBtn = document.querySelector('button[type="submit"], button[name="action"][value="default"], button.c_button')
+      || Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().toLowerCase().includes('continue'));
+    if (submitBtn) {
+      submitBtn.click();
+    }
+    return 'SUBMITTED_OTP_SINGLE';
+  }
+
+  return 'NO_INPUT';
+}
 
 async function getCollectStatus(sendResponse) {
   try {
@@ -696,201 +1074,14 @@ async function collectSessionsFromAccountsEndpoint() {
   }
 }
 
-async function collectSessionsFromVisibleWorkspaceMenu() {
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  const isVisible = (el) => {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-  };
-
-  const normalizeText = (text) => String(text || '').replace(/\s+/g, ' ').trim();
-
-  const clickProfileMenu = async () => {
-    const clickAt = (x, y) => {
-      const el = document.elementFromPoint(x, y);
-      const target = el && (el.closest('button,[role="button"],[tabindex],a') || el);
-      if (!target || !isVisible(target)) return false;
-      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
-      target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
-      target.click();
-      return true;
-    };
-
-    // First try the exact bottom-left account/profile area shown in ChatGPT's sidebar.
-    const coordinateClicks = [
-      [150, window.innerHeight - 45],
-      [150, window.innerHeight - 80],
-      [45, window.innerHeight - 45]
-    ];
-
-    for (const [x, y] of coordinateClicks) {
-      if (clickAt(x, y)) {
-        await wait(700);
-        return true;
-      }
-    }
-
-    const candidates = [...document.querySelectorAll('button,[role="button"],[tabindex],div')]
-      .filter(isVisible)
-      .map((el) => ({ el, rect: el.getBoundingClientRect(), text: normalizeText(el.innerText || el.textContent || '') }))
-      .filter((item) => item.rect.left < 330 && item.rect.top > window.innerHeight - 120)
-      .filter((item) => /personal account|@|Ribka/i.test(item.text));
-
-    candidates.sort((a, b) => a.rect.top - b.rect.top);
-    const target = candidates[0] && (candidates[0].el.closest('button,[role="button"],[tabindex]') || candidates[0].el);
-
-    if (target && isVisible(target)) {
-      target.click();
-      await wait(700);
-      return true;
-    }
-
-    return false;
-  };
-
-  const isWorkspaceLabel = (text) => {
-    const value = normalizeText(text);
-    if (!value || value.length < 2 || value.length > 80) return false;
-    if (value.includes('@')) return false;
-    if (/deactivated/i.test(value)) return false;
-    if (/^(ChatGPT|New chat|Search chats|Library|Projects|Apps|More|Personalization|Profile|Settings|Help|Log out|Personal account)$/i.test(value)) return false;
-    return true;
-  };
-
-  const findMenuContainer = () => {
-    const candidates = [...document.querySelectorAll('div,section,[role="menu"],[role="dialog"],[data-radix-popper-content-wrapper]')]
-      .filter(isVisible)
-      .map((el) => ({ el, rect: el.getBoundingClientRect(), text: normalizeText(el.innerText || el.textContent || '') }))
-      .filter((item) => item.rect.width >= 220 && item.rect.width <= 520 && item.rect.height >= 120 && item.rect.left <= 900)
-      .filter((item) => /deactivated|@|Beulah|mktaylor|Class|galway|STEM/i.test(item.text));
-
-    candidates.sort((a, b) => (b.text.length + b.rect.height) - (a.text.length + a.rect.height));
-    return candidates[0] && candidates[0].el;
-  };
-
-  const openWorkspaceMenu = async () => {
-    let container = findMenuContainer();
-    if (container) return container;
-
-    const buttons = [...document.querySelectorAll('button,[role="button"]')].filter(isVisible);
-    const trigger = buttons.find((button) => normalizeText(button.innerText || button.textContent).startsWith('ChatGPT'))
-      || buttons.find((button) => /ChatGPT/.test(normalizeText(button.innerText || button.textContent)));
-
-    if (trigger) {
-      trigger.click();
-      await wait(700);
-    }
-
-    return findMenuContainer();
-  };
-
-  const getWorkspaceRows = (container) => {
-    const rowMap = new Map();
-    const elements = [...container.querySelectorAll('button,[role="menuitem"],a,[tabindex],div,span')].filter(isVisible);
-
-    for (const el of elements) {
-      const text = normalizeText(el.innerText || el.textContent || '');
-      if (!isWorkspaceLabel(text)) continue;
-
-      const row = el.closest('button,[role="menuitem"],a,[tabindex]') || el.closest('div') || el;
-      if (!row || !isVisible(row)) continue;
-
-      const rowText = normalizeText(row.innerText || row.textContent || text);
-      const label = isWorkspaceLabel(rowText) ? rowText : text;
-      if (!isWorkspaceLabel(label)) continue;
-      if (!rowMap.has(label)) rowMap.set(label, row);
-    }
-
-    return [...rowMap.entries()].map(([label, row]) => ({ label, row }));
-  };
-
-  const fetchSession = async () => {
-    const sessionRes = await fetch('https://chatgpt.com/api/auth/session', {
-      method: 'GET',
-      credentials: 'include'
-    });
-
-    if (!sessionRes.ok) throw new Error('session fetch failed');
-    return await sessionRes.json();
-  };
-
-  try {
-    await clickProfileMenu();
-    const initialContainer = await openWorkspaceMenu();
-    if (!initialContainer) {
-      return { success: false, error: 'Dropdown workspace tidak ditemukan. Buka dropdown workspace ChatGPT dulu.' };
-    }
-
-    const labels = getWorkspaceRows(initialContainer).map((item) => item.label);
-    if (labels.length === 0) {
-      return { success: false, error: 'Tidak ada workspace aktif yang bisa diklik di dropdown.' };
-    }
-
-    const sessions = [];
-    const skipped = [];
-
-    for (const label of labels) {
-      try {
-        const container = await openWorkspaceMenu();
-        if (!container) {
-          skipped.push({ label, reason: 'menu_closed' });
-          continue;
-        }
-
-        const rows = getWorkspaceRows(container);
-        const item = rows.find((row) => row.label === label);
-        if (!item) {
-          skipped.push({ label, reason: 'row_missing' });
-          continue;
-        }
-
-        item.row.click();
-        await wait(2200);
-
-        if (/\/workspace\/deactivated/i.test(location.pathname)) {
-          skipped.push({ label, reason: 'deactivated' });
-          history.back();
-          await wait(1200);
-          continue;
-        }
-
-        const sessionData = await fetchSession();
-        if (!sessionData || !sessionData.accessToken) {
-          skipped.push({ label, reason: 'no_token' });
-          continue;
-        }
-
-        sessions.push({ label, sessionData });
-      } catch (err) {
-        skipped.push({ label, reason: 'error' });
-      }
-    }
-
-    return { success: true, sessions, skipped };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
-
-async function fetchChatGPTSessionFromPage() {
-  try {
-    const sessionRes = await fetch('https://chatgpt.com/api/auth/session', {
-      method: 'GET',
-      credentials: 'include'
-    });
-
-    if (!sessionRes.ok) {
-      return { success: false, error: 'Gagal mengambil session auth. Pastikan Anda sudah login.' };
-    }
-
-    const sessionData = await sessionRes.json();
-    return { success: true, sessionData };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
+function fetchChatGPTSessionFromPage() {
+  return fetch('https://chatgpt.com/api/auth/session', {
+    method: 'GET',
+    credentials: 'include'
+  })
+  .then(res => res.json())
+  .then(sessionData => ({ success: true, sessionData }))
+  .catch(err => ({ success: false, error: err.message }));
 }
 
 function validateSessionForExport(sessionData) {
@@ -1045,7 +1236,7 @@ async function startProcessing(workspaceIds, sendResponse) {
 
     const newState = {
       status: 'processing',
-      progress: { current: 0, total: workspaceIds.length, okCount: 0, failCount: 0 },
+      progress: { current: 0, total: workspaceIds.length, okCount: 0, failCount: 0, pendingCount: 0, requestCount: 0 },
       results: [],
       errorMsg: '',
       activeTabId: tab.id,
@@ -1053,13 +1244,9 @@ async function startProcessing(workspaceIds, sendResponse) {
     };
     await setStoredState(newState);
 
-    // Send positive start acknowledgement to popup
     sendResponse({ success: true });
-
-    // Start listening for active tab closure
     setupTabListener();
 
-    // Inject batch processing script into active ChatGPT tab
     chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: performBatchWorkspaceJoin,
@@ -1082,14 +1269,52 @@ async function startProcessing(workspaceIds, sendResponse) {
   }
 }
 
-// =============================================================
-// Function injected into the active ChatGPT page context
-// =============================================================
 async function performBatchWorkspaceJoin(workspaceIds) {
   const safeSendMessage = (msg) => {
     try {
       chrome.runtime.sendMessage(msg).catch(() => {});
     } catch (e) {}
+  };
+
+  const verifyWorkspaceAccess = async (workspaceId, accessToken) => {
+    const exchangePath = `https://chatgpt.com/api/auth/session?exchange_workspace_token=true&workspace_id=${encodeURIComponent(workspaceId)}&reason=account_switcher`;
+
+    try {
+      const verifyRes = await fetch(exchangePath, {
+        method: "GET",
+        headers: {
+          "accept": "application/json",
+          "authorization": `Bearer ${accessToken}`,
+          "oai-language": "en-US"
+        },
+        credentials: "include"
+      });
+
+      const verifyText = await verifyRes.text();
+      let verifyData;
+      try { verifyData = JSON.parse(verifyText); } catch (e) { verifyData = verifyText; }
+
+      const account = verifyData && verifyData.account;
+      const error = verifyData && verifyData.workspaceTokenExchangeError;
+      const accountId = account && (account.id || account.account_id);
+      const joined = Boolean(verifyRes.ok && verifyData && verifyData.accessToken && accountId === workspaceId && !error);
+
+      return {
+        joined,
+        status: verifyRes.status,
+        accountId: accountId || '',
+        error: error || null,
+        hasAccessToken: Boolean(verifyData && verifyData.accessToken)
+      };
+    } catch (err) {
+      return {
+        joined: false,
+        status: 0,
+        accountId: '',
+        error: err.message || String(err),
+        hasAccessToken: false
+      };
+    }
   };
 
   try {
@@ -1114,14 +1339,13 @@ async function performBatchWorkspaceJoin(workspaceIds) {
     for (let i = 0; i < workspaceIds.length; i++) {
       const id = workspaceIds[i];
       try {
-        const res = await fetch(`https://chatgpt.com/backend-api/accounts/${id}/invites/request`, {
+        let res = await fetch(`https://chatgpt.com/backend-api/accounts/${id}/invites/request`, {
           method: "POST",
           headers: {
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.9",
             "authorization": `Bearer ${accessToken}`,
             "cache-control": "no-cache",
-            "content-type": "application/json",
             "oai-language": "en-US",
             "pragma": "no-cache",
             "sec-ch-ua-arch": "\"x86\"",
@@ -1136,24 +1360,78 @@ async function performBatchWorkspaceJoin(workspaceIds) {
           },
           referrer: "https://chatgpt.com/k12-verification",
           referrerPolicy: "strict-origin-when-cross-origin",
-          body: JSON.stringify({}),
+          body: null,
           mode: "cors",
           credentials: "include"
         });
+
+        // Retry once on HTTP 429 (Too Many Requests / Rate limit)
+        if (res.status === 429) {
+          console.warn(`[Workspace Joiner] HTTP 429 for ${id}, retrying in 3 seconds...`);
+          await new Promise(r => setTimeout(r, 3000));
+          res = await fetch(`https://chatgpt.com/backend-api/accounts/${id}/invites/request`, {
+            method: "POST",
+            headers: {
+              "accept": "*/*",
+              "accept-language": "en-US,en;q=0.9",
+              "authorization": `Bearer ${accessToken}`,
+              "cache-control": "no-cache",
+              "oai-language": "en-US",
+              "pragma": "no-cache",
+              "sec-ch-ua-arch": "\"x86\"",
+              "sec-ch-ua-bitness": "\"64\"",
+              "sec-ch-ua-mobile": "?0",
+              "sec-ch-ua-model": "\"\"",
+              "sec-ch-ua-platform": "\"macOS\"",
+              "sec-ch-ua-platform-version": "\"13.5.1\"",
+              "sec-fetch-dest": "empty",
+              "sec-fetch-mode": "cors",
+              "sec-fetch-site": "same-origin"
+            },
+            referrer: "https://chatgpt.com/k12-verification",
+            referrerPolicy: "strict-origin-when-cross-origin",
+            body: null,
+            mode: "cors",
+            credentials: "include"
+          });
+        }
 
         const status = res.status;
         const text = await res.text();
         let data;
         try { data = JSON.parse(text); } catch (e) { data = text; }
 
+        let verification = await verifyWorkspaceAccess(id, accessToken);
+        let verifyAttempts = 1;
+
+        if (res.ok && !verification.joined) {
+          await new Promise(r => setTimeout(r, 1000));
+          verification = await verifyWorkspaceAccess(id, accessToken);
+          verifyAttempts = 2;
+        }
+
+        const isOk = res.ok || verification.joined;
+
         safeSendMessage({
           action: 'JOIN_PROGRESS',
-          result: { id, ok: res.ok, status, data },
+          result: {
+            id,
+            ok: isOk,
+            accepted: res.ok,
+            joined: verification.joined,
+            pending: res.ok && !verification.joined,
+            status,
+            data,
+            verifyStatus: verification.status,
+            verifyAccountId: verification.accountId,
+            verifyError: verification.error,
+            verifyHasAccessToken: verification.hasAccessToken,
+            verifyAttempts
+          },
           index: i + 1,
           total: workspaceIds.length
         });
 
-        // Small delay to avoid rate limiting
         await new Promise(r => setTimeout(r, 300));
 
       } catch (err) {

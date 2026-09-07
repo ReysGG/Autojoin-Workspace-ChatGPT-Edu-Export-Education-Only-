@@ -1,58 +1,14 @@
 // ============================================================
-// Daftar workspace ID dari workspace.md (26-07-06 dan seterusnya)
-// Sudah di-deduplicate, skip yang rusak (炸车/灵车)
+// Daftar workspace ID dari workspace.md
 // ============================================================
 const WORKSPACE_IDS = [
-  "1e595494-2426-4946-b688-58ba75604bcc",
-  "cf8e512d-1f3b-4603-950c-3d9758a8b435",
-  "444437a7-c08b-423e-a2c8-65c17383ba24",
-  "a0a16bc9-e1b1-45f0-b269-812b53f60121",
-  "696cc59b-a475-44b0-b206-4e03593e658f",
-  "42822f8a-b530-4649-97ea-83aac42ecf6d",
-  "47336c9d-7607-4478-b37c-018049af1e46",
-  "59208eb6-ec43-4d87-9289-dbd9e250bdd6",
-  "2c82c020-e1bc-4363-9502-a6794405f793",
-  "9901799e-e832-48b1-9278-9abe73168708",
-  "83bec9de-395a-44e6-9a30-189508c22b99",
-  "eb6642e8-b4a6-4652-9c18-67099f2781cc",
-  "ff598c4d-ccaf-40c1-bfaa-cb94565764b1", // Beulah Middle School
-  "b49cd6d8-b52d-4c21-93d7-89cc19b5e18e",
-  "5e4c9b31-1b4e-4887-839b-607597928d7c", // Team-K12
-  "a65ebb2e-dd7c-4fdb-9a5d-6ccaf6ad00a3",
-  "52fb9943-aa13-4959-92bc-fe5e81c9e7f0",
-  "8064da55-e484-4ba0-a0bc-db05ee84462b",
-  "885440cb-01f9-4927-b2da-c7734cde849d",
-  "d3c40646-82b0-42a5-a9e6-01819e5f66b2",
-  "a4ed7848-dc98-4510-b4f8-ee170aad52ce",
-  "0c0a3db9-ada3-44c0-8a15-f39a24c903f0",
-  "c4d1df5b-81cd-445d-a5ea-4131a0fbb9d2",
-  "1a4f5089-cab2-4f46-8073-6c8bb13f6aff",
-  "44a5d4e6-e463-4412-88f3-0c98290027b7",
-  "73fb6c1c-cac8-4285-99ec-44c6fe854f70",
-  "7e443923-cb5f-45f4-a8a1-682de043f351",
-  "52dcb028-8f47-4fab-b7e1-d827125b8687",
-  "81597c95-7832-4fdc-a1e8-0835bdba7fb3",
-  "4fdf7f85-38d1-4eea-aeb9-f50939ffb9d8",
-  "8c27eb04-d736-4548-af16-662dde1dc6e9",
-  "e1fbfed6-86a4-49b0-868d-17c396358d57",
-  "191c2ca9-06fe-45ff-ac6a-de4ec8fefee9",
-  "ab9141b4-9090-4dbd-bb93-074e485f0f03",
-  "39dd4d8c-1162-4c44-9275-0b7e53a3fcf9",
-  "255de4a6-96a4-430a-b660-358954424e79",
-  "631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
-  "c72dcdb4-63a0-40b7-b0bb-ccce3ca54984",
-  "2b636e76-a87b-4222-b536-2dc4a545109f",
-  "4779b1d7-3109-4ecb-957f-80262f4d7161",
-  "ae67aa09-f3d3-4895-977d-9ca44ed1d996",
-  "6daa08c1-59c8-4e06-9bc8-9d7246a63057",
-  "521ffc8f-9612-4950-84ed-95773138eca6",
+  "df0cb75f-1e09-43c4-b973-043f6bfafcbd",
 ];
 
 document.getElementById('joinBtn').addEventListener('click', () => {
   const statusBox = document.getElementById('statusBox');
   const progressBox = document.getElementById('progressBox');
 
-  // Reset display states before launching requests
   statusBox.style.display = 'none';
   progressBox.style.display = 'none';
 
@@ -77,13 +33,29 @@ document.getElementById('downloadMultiAuthBtn').addEventListener('click', handle
 document.getElementById('clearMultiAuthBtn').addEventListener('click', handleClearMultiAuthClick);
 document.getElementById('exportAuthBtn').addEventListener('click', handleExportAuthClick);
 document.getElementById('downloadAuthBtn').addEventListener('click', handleDownloadAuthClick);
+document.getElementById('selectSwitchAccountBtn').addEventListener('click', () => {
+  document.getElementById('switchAccountFileInput').click();
+});
+document.getElementById('switchAccountFileInput').addEventListener('change', handleSwitchAccountFileSelected);
+
+// Outlook Auto Login Listeners
+document.getElementById('selectOutlookAccountBtn').addEventListener('click', () => {
+  document.getElementById('outlookAccountFileInput').click();
+});
+document.getElementById('outlookAccountFileInput').addEventListener('change', handleOutlookFileSelected);
+document.getElementById('startOutlookLoginBtn').addEventListener('click', handleStartOutlookLoginClick);
 
 // Load current background processing status when popup opens
 document.addEventListener('DOMContentLoaded', () => {
+  const badgeEl = document.getElementById('targetBadge');
+  if (badgeEl) {
+    badgeEl.textContent = `${WORKSPACE_IDS.length} target${WORKSPACE_IDS.length > 1 ? 's' : ''}`;
+  }
+
+  checkCurrentUserSession();
+
   chrome.runtime.sendMessage({ action: 'GET_STATUS' }, (state) => {
-    if (chrome.runtime.lastError) {
-      return;
-    }
+    if (chrome.runtime.lastError) return;
     handleStatusUpdate(state);
   });
 
@@ -92,6 +64,24 @@ document.addEventListener('DOMContentLoaded', () => {
     renderMultiAuthStatus(response.state, response.accountCount);
   });
 });
+
+async function checkCurrentUserSession() {
+  const emailEl = document.getElementById('currentUserEmail');
+  if (!emailEl) return;
+  try {
+    const res = await fetch("https://chatgpt.com/api/auth/session", { credentials: "include" });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.user && data.user.email) {
+        emailEl.textContent = `👤 Akun Login: ${data.user.email}`;
+        return;
+      }
+    }
+    emailEl.textContent = `⚠️ Belum login di chatgpt.com`;
+  } catch (e) {
+    emailEl.textContent = `⚠️ Gagal mengecek session login`;
+  }
+}
 
 // Listen for storage changes
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -122,11 +112,13 @@ function handleStatusUpdate(state) {
     joinBtn.disabled = true;
     spinner.style.display = 'block';
     btnText.textContent = 'Memproses...';
+    const counts = getJoinCounts(state);
     
     progressBox.style.display = 'block';
     progressBox.innerHTML = `
-      <div class="progress-title">⏳ Sedang memproses ${state.progress.current} dari ${state.progress.total} workspace...</div>
-      <div class="status-body">Berhasil: ${state.progress.okCount} · Gagal: ${state.progress.failCount}</div>
+      <div class="progress-title">Sedang memproses ${state.progress.current} dari ${state.progress.total} workspace...</div>
+      <div class="status-body">Joined: ${counts.joined} · Pending: ${counts.pending} · Failed: ${counts.failed}</div>
+      ${renderJoinResults(state.results)}
     `;
     statusBox.style.display = 'none';
   } else if (state.status === 'completed') {
@@ -134,18 +126,23 @@ function handleStatusUpdate(state) {
     spinner.style.display = 'none';
     btnText.textContent = 'Ajukan Join Workspace';
 
-    const okCount = state.progress.okCount;
-    const failCount = state.progress.failCount;
-    const total = state.progress.total;
+    const counts = getJoinCounts(state);
+    const okCount = counts.joined;
+    const failCount = counts.failed;
+    const pendingCount = counts.pending;
+    const total = counts.total;
 
     progressBox.style.display = 'block';
     progressBox.innerHTML = `
-      <div class="progress-title">📊 Selesai</div>
-      <div class="status-body">Berhasil: ${okCount} · Gagal: ${failCount} · Total: ${total}</div>
+      <div class="progress-title">Selesai</div>
+      <div class="status-body">Joined: ${okCount} · Pending: ${pendingCount} · Failed: ${failCount} · Total: ${total}</div>
+      ${renderJoinResults(state.results)}
     `;
 
     if (okCount > 0) {
-      showStatus('success', `✓ ${okCount} berhasil`, `${failCount} gagal dari ${total} workspace.`);
+      showStatus('success', `${okCount} joined`, `${pendingCount} pending, ${failCount} failed dari ${total} workspace.`);
+    } else if (pendingCount > 0) {
+      showStatus('error', 'Request diterima, belum joined', `${pendingCount} pending approval, ${failCount} failed dari ${total} workspace.`);
     } else {
       showStatus('error', '✗ Semua request gagal', `Periksa login dan coba lagi.`);
     }
@@ -167,9 +164,117 @@ function handleStatusUpdate(state) {
   }
 }
 
+function getJoinCounts(state) {
+  const progress = state && state.progress ? state.progress : {};
+  const results = Array.isArray(state && state.results) ? state.results : [];
+
+  const joined = progress.okCount ?? results.filter((item) => item && item.joined).length;
+  const pending = progress.pendingCount ?? results.filter((item) => item && item.accepted && !item.joined).length;
+  const failed = progress.failCount ?? results.filter((item) => item && !item.accepted).length;
+  const total = progress.total || results.length || 0;
+
+  return { joined, pending, failed, total };
+}
+
+function renderJoinResults(results) {
+  if (!Array.isArray(results) || !results.length) return '';
+
+  const items = results.slice(-12).map((item) => {
+    const isRateLimited = item.status === 429;
+    const state = item.joined ? 'joined' : item.accepted ? 'pending' : (isRateLimited ? 'rate limited' : 'failed');
+    const status = item.status ? `HTTP ${item.status}` : 'HTTP 0';
+    const verify = item.verifyStatus ? `verify ${item.verifyStatus}` : 'verify 0';
+    const reason = item.verifyError
+      ? ` · ${typeof item.verifyError === 'string' ? item.verifyError : JSON.stringify(item.verifyError)}`
+      : (isRateLimited ? ' · Rate limit invite API (coba lagi nanti)' : '');
+
+    return `
+      <div class="result-item ${item.joined ? 'ok' : item.accepted ? '' : 'fail'}">
+        <span>${state}</span>
+        <span class="result-id">${escapeHtml(item.id || '')}</span>
+        <span class="result-detail">${escapeHtml(`${status} · ${verify}${reason}`)}</span>
+      </div>
+    `;
+  }).join('');
+
+  return `<div class="result-list">${items}</div>`;
+}
+
+function parseOutlookAccountLine(line) {
+  if (!line || typeof line !== 'string') return null;
+  const parts = line.trim().split('----');
+  if (parts.length < 4) return null;
+  return {
+    email: parts[0].trim(),
+    password: parts[1].trim(),
+    clientId: parts[2].trim(),
+    refreshToken: parts[3].trim()
+  };
+}
+
+async function handleStartOutlookLoginClick() {
+  const inputEl = document.getElementById('outlookAccountInput');
+  const rawText = inputEl.value || '';
+  const firstLine = rawText.split('\n').map(l => l.trim()).find(l => l.includes('----'));
+
+  if (!firstLine) {
+    showOutlookStatus('error', 'Format tidak sesuai', 'Masukkan setidaknya 1 baris dengan format: email----password----client_id----refresh_token');
+    return;
+  }
+
+  const accountData = parseOutlookAccountLine(firstLine);
+  if (!accountData) {
+    showOutlookStatus('error', 'Format tidak sesuai', 'Gunakan format: email----password----client_id----refresh_token');
+    return;
+  }
+
+  showOutlookStatus('success', 'Memulai Login...', `Akun: ${accountData.email}. Halaman login ChatGPT dibuka...`);
+
+  chrome.runtime.sendMessage({
+    action: 'START_OUTLOOK_AUTO_LOGIN',
+    accountData,
+    workspaceId: WORKSPACE_IDS[0]
+  }, (response) => {
+    if (chrome.runtime.lastError) {
+      showOutlookStatus('error', 'Gagal memproses', chrome.runtime.lastError.message);
+      return;
+    }
+
+    if (!response || !response.success) {
+      showOutlookStatus('error', 'Gagal memproses', (response && response.error) || 'Gagal memulai login.');
+      return;
+    }
+
+    showOutlookStatus('success', '✓ Auto Login Berjalan', `Login untuk ${accountData.email} sedang berjalan di latar belakang. OTP akan diambil otomatis dari Xunmail API.`);
+  });
+}
+
+function handleOutlookFileSelected(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  file.text().then(text => {
+    document.getElementById('outlookAccountInput').value = text;
+    showOutlookStatus('success', 'File dimuat', `Berhasil memuat file: ${file.name}. Klik "Start Auto Login & Join" untuk memulai.`);
+  }).catch(err => {
+    showOutlookStatus('error', 'Gagal membaca file', err.message);
+  });
+}
+
+function showOutlookStatus(type, title, body) {
+  const statusBox = document.getElementById('outlookAutoLoginStatusBox');
+  if (!statusBox) return;
+  statusBox.className = `status-container ${type}`;
+  statusBox.style.display = 'block';
+  statusBox.innerHTML = `
+    <div class="status-title">${escapeHtml(title)}</div>
+    <div class="status-body">${escapeHtml(body)}</div>
+  `;
+}
+
 async function handleStartCollectMultiClick() {
   setMultiAuthButtonsDisabled(true);
-  showMultiAuthStatus('success', 'Auto collect dimulai', 'Mengambil daftar workspace dari endpoint accounts/check, lalu exchange session per workspace aktif...');
+  showMultiAuthStatus('success', 'Auto collect dimulai', 'Mengambil daftar workspace dari endpoint accounts/check...');
 
   chrome.runtime.sendMessage({ action: 'START_COLLECT_MULTI_AUTH', targets: WORKSPACE_IDS }, (response) => {
     setMultiAuthButtonsDisabled(false);
@@ -229,7 +334,7 @@ async function handleDownloadMultiAuthClick() {
 
     try {
       await downloadJsonFile('convert-auth.json', response.convertAuthJson);
-      showMultiAuthStatus('success', 'Download dimulai', `${response.accountCount} account digabung ke convert-auth.json. Kalau file sudah ada, Chrome otomatis membuat nama (1), (2), dan seterusnya.`);
+      showMultiAuthStatus('success', 'Download dimulai', `${response.accountCount} account digabung ke convert-auth.json.`);
     } catch (err) {
       showMultiAuthStatus('error', 'Download gagal', err.message || String(err));
     }
@@ -314,7 +419,7 @@ async function handleClearChatGPTDataClick() {
       return;
     }
 
-    showClearDataStatus('success', 'Data ChatGPT dibersihkan', 'Sekarang tutup tab loop, buka https://chatgpt.com lagi, lalu login ulang jika diminta.');
+    showClearDataStatus('success', 'Data ChatGPT dibersihkan', 'Sekarang tutup tab loop, buka https://chatgpt.com lagi, lalu login ulang.');
   });
 }
 
@@ -330,17 +435,17 @@ function showClearDataStatus(type, title, body) {
 
 async function handleExportAuthClick() {
   if (!window.showDirectoryPicker) {
-    showAuthStatus('error', 'Folder picker tidak tersedia', 'Pakai tombol Download Instead untuk menyimpan file lewat dialog download Chrome.');
+    showAuthStatus('error', 'Folder picker tidak tersedia', 'Pakai tombol Download Instead untuk menyimpan file.');
     return;
   }
 
   setAuthButtonsDisabled(true);
   hideAuthPreview();
-  showAuthStatus('success', 'Menunggu folder', 'Pilih folder project extension, lalu auth.json dan convert-auth.json akan dibuat di sana.');
+  showAuthStatus('success', 'Menunggu folder', 'Pilih folder project extension...');
 
   try {
     const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-    showAuthStatus('success', 'Mengambil session', 'Membaca session ChatGPT aktif dari tab yang sedang dibuka...');
+    showAuthStatus('success', 'Mengambil session', 'Membaca session ChatGPT aktif...');
 
     const response = await requestAuthExportPayload();
     if (!response.success) {
@@ -352,10 +457,10 @@ async function handleExportAuthClick() {
     const convertAuthFileName = await writeJsonFile(directoryHandle, 'convert-auth.json', response.convertAuthJson);
 
     renderAuthPreview(response.preview);
-    showAuthStatus('success', 'Auth files tersimpan', `Berhasil membuat ${authFileName} dan ${convertAuthFileName} di folder yang dipilih.`);
+    showAuthStatus('success', 'Auth files tersimpan', `Berhasil membuat ${authFileName} dan ${convertAuthFileName}.`);
   } catch (err) {
     if (err && err.name === 'AbortError') {
-      showAuthStatus('error', 'Export dibatalkan', 'Folder tidak dipilih, jadi tidak ada file yang dibuat.');
+      showAuthStatus('error', 'Export dibatalkan', 'Folder tidak dipilih.');
     } else {
       showAuthStatus('error', 'Export gagal', err.message || String(err));
     }
@@ -367,7 +472,7 @@ async function handleExportAuthClick() {
 async function handleDownloadAuthClick() {
   setAuthButtonsDisabled(true);
   hideAuthPreview();
-  showAuthStatus('success', 'Mengambil session', 'Membaca session ChatGPT aktif dari tab yang sedang dibuka...');
+  showAuthStatus('success', 'Mengambil session', 'Membaca session ChatGPT aktif...');
 
   try {
     const response = await requestAuthExportPayload();
@@ -380,7 +485,7 @@ async function handleDownloadAuthClick() {
     await downloadJsonFile('convert-auth.json', response.convertAuthJson);
 
     renderAuthPreview(response.preview);
-    showAuthStatus('success', 'Download dimulai', 'File auth.json dan convert-auth.json akan tersimpan ke folder Downloads default Chrome. Kalau sudah ada, Chrome otomatis membuat nama (1), (2), dan seterusnya.');
+    showAuthStatus('success', 'Download dimulai', 'File auth.json dan convert-auth.json tersimpan di Downloads.');
   } catch (err) {
     showAuthStatus('error', 'Download gagal', err.message || String(err));
   } finally {
@@ -502,6 +607,61 @@ function showStatus(type, title, body) {
   statusBox.className = `status-container ${type}`;
   statusBox.style.display = 'block';
   statusBox.innerHTML = `
+    <div class="status-title">${escapeHtml(title)}</div>
+    <div class="status-body">${escapeHtml(body)}</div>
+  `;
+}
+
+async function handleSwitchAccountFileSelected(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  const btn = document.getElementById('selectSwitchAccountBtn');
+  btn.disabled = true;
+  showSwitchAccountStatus('success', 'Membaca file...', file.name);
+
+  try {
+    const text = await file.text();
+    let authData;
+    try {
+      authData = JSON.parse(text);
+    } catch (e) {
+      throw new Error('File yang dipilih bukan JSON yang valid.');
+    }
+
+    showSwitchAccountStatus('success', 'Mengganti akun & Auto-Join...', 'Mengatur token, membuka ChatGPT, dan memulai request join...');
+
+    chrome.runtime.sendMessage({ action: 'SWITCH_ACCOUNT_JSON', authData }, (response) => {
+      btn.disabled = false;
+      event.target.value = '';
+
+      if (chrome.runtime.lastError) {
+        showSwitchAccountStatus('error', 'Gagal ganti akun', chrome.runtime.lastError.message);
+        return;
+      }
+
+      if (!response || !response.success) {
+        showSwitchAccountStatus('error', 'Gagal ganti akun', (response && response.error) || 'Gagal memproses file JSON.');
+        return;
+      }
+
+      const acc = response.account || {};
+      const detail = [acc.email, acc.name, acc.planType].filter(Boolean).join(' · ');
+      showSwitchAccountStatus('success', '✓ Akun Berhasil Diganti & Auto-Join Dimulai!', `${detail || file.name}. Request join ke workspace target otomatis berjalan.`);
+    });
+  } catch (err) {
+    btn.disabled = false;
+    event.target.value = '';
+    showSwitchAccountStatus('error', 'Gagal membaca file', err.message || String(err));
+  }
+}
+
+function showSwitchAccountStatus(type, title, body) {
+  const switchAccountStatusBox = document.getElementById('switchAccountStatusBox');
+  if (!switchAccountStatusBox) return;
+  switchAccountStatusBox.className = `status-container ${type}`;
+  switchAccountStatusBox.style.display = 'block';
+  switchAccountStatusBox.innerHTML = `
     <div class="status-title">${escapeHtml(title)}</div>
     <div class="status-body">${escapeHtml(body)}</div>
   `;
